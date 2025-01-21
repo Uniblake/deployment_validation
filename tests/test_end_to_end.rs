@@ -1,6 +1,8 @@
 #[cfg(test)]
 
 mod tests {
+    use alloy::primitives::{U256, B256};
+    use alloy::primitives::{address, Address};
     use alloy_node_bindings::{Anvil, AnvilInstance};
     use assert_cmd::Command;
     use dvf_libs::dvf::config::DVFConfig;
@@ -16,6 +18,9 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
     use tempfile::NamedTempFile;
+    use dvf_libs::web3::get_eth_storage_proof;
+    use std::collections::HashMap;
+    use reth_trie::root;
 
     #[derive(PartialEq, Clone)]
     enum LocalClientType {
@@ -1365,6 +1370,103 @@ mod tests {
                 drop(local_client);
             }
         }
+    }
+
+    #[test]
+    fn test_anvil_incorrect_storage_root() {
+        let port = 8554u16;
+        let config_file = match DVFConfig::test_config_file(Some(port)) {
+            Ok(config) => config,
+            Err(err) => {
+                println!("{}", err);
+                assert!(false);
+                return;
+            }
+        };
+
+        let testcase = TestCaseE2E {
+            script: String::from("script/Deploy_AnvilStorageRoot.s.sol"),
+            contract: String::from("CrazyStruct"),
+            expected: String::from("tests/expected_dvfs/Deploy_2.dvf.json"),
+        };
+
+        let url = format!("http://localhost:{}", port).to_string();
+        let local_client = start_local_client(LocalClientType::Anvil, port);
+
+        // deploy contract
+        let mut forge_cmd = Command::new("forge");
+        forge_cmd.current_dir("tests/Contracts");
+        let forge_assert = forge_cmd
+            .args(&[
+                "script",
+                &testcase.script,
+                "--rpc-url",
+                &url,
+                "--broadcast",
+                "--slow",
+            ])
+            .assert()
+            .success();
+        println!(
+            "{}",
+            &String::from_utf8_lossy(&forge_assert.get_output().stdout)
+        );
+
+        // query the storage root of the contract
+        let mut dvf_config = DVFConfig::from_path(config_file.path()).unwrap();
+        dvf_config.active_chain_id = Option::Some(1337);
+        let account = address!("0x5fbdb2315678afecb367f032d93f642f64180aa3");
+        let slots = vec![
+            U256::from(0x0), 
+            U256::from_str_radix("16e765cf27582f13dd5746ccd5bb2f9b2b260c0f988f6c2427c7be4d78a655f8", 16).unwrap(),
+            U256::from_str_radix("9a1c16d8591b9689d5bce2f42173a5cb4537141492c9f713a8ac2f9e0551b9c8", 16).unwrap(),
+            ];
+
+        let storage = get_eth_storage_proof(&dvf_config, &account, slots, 2).unwrap();
+
+        let storage_hash = storage.storage_hash;
+
+        println!("Anvil root hash: {}", storage_hash);
+        for each in storage.storage_proof {
+            println!("Slot {}: {}", each.key, each.value);
+        }
+
+        // reconstruct the storage root with redundant 0
+        let snapshot: HashMap<B256, U256> = HashMap::from([
+            (   
+                B256::from(U256::from(0x0)),
+                U256::from(2)
+            ),
+            (   
+                B256::from(U256::from_str_radix("16e765cf27582f13dd5746ccd5bb2f9b2b260c0f988f6c2427c7be4d78a655f8", 16).unwrap()),
+                U256::from(1)
+            ),
+            (   
+                B256::from(U256::from_str_radix("9a1c16d8591b9689d5bce2f42173a5cb4537141492c9f713a8ac2f9e0551b9c8", 16).unwrap()),
+                U256::from(0)
+            ),
+            ]
+        );
+        let reconstructed_root0 = root::storage_root_unhashed(snapshot);
+        println!("Reconstructed root with unremoved 0: {:?}", reconstructed_root0);
+
+        // reconstruct the storage root
+        let snapshot: HashMap<B256, U256> = HashMap::from([
+            (   
+                B256::from(U256::from(0x0)),
+                U256::from(2)
+            ),
+            (   
+                B256::from(U256::from_str_radix("16e765cf27582f13dd5746ccd5bb2f9b2b260c0f988f6c2427c7be4d78a655f8", 16).unwrap()),
+                U256::from(1)
+            ),
+            ]
+        );
+        let reconstructed_root = root::storage_root_unhashed(snapshot);
+        println!("Reconstructed root without 0: {:?}", reconstructed_root);
+
+        assert_eq!(storage_hash, reconstructed_root0);
+
     }
 
     #[test]

@@ -607,6 +607,37 @@ pub fn get_eth_account_at_block(
     Ok(proof_resp.storage_hash)
 }
 
+// Not every rpc supports eth_getAccount.
+// So we have to retrieve the account by querying an empty storage proof
+pub fn get_eth_storage_proof(
+    config: &DVFConfig,
+    account: &Address,
+    slots: Vec<U256>,
+    block: u64,
+) -> Result<EIP1186AccountProofResponse, ValidationError> {
+    let slots: Vec<String> = slots
+        .iter()
+        .map(|slot| format!("0x{:064x}", slot)) // Format as 64-character padded hex
+        .collect();
+    let block_hex = format!("{:#x}", block);
+    let request_body = json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getProof",
+        "params": [
+            account,
+            slots, // slots
+            block_hex,
+            ],
+        "id": 1
+    });
+
+    let result = send_blocking_web3_post(config, &request_body)?;
+
+    let proof_resp: EIP1186AccountProofResponse = serde_json::from_value(result)?;
+
+    Ok(proof_resp)
+}
+
 fn get_deployment_tx_from_blockscout(
     config: &DVFConfig,
     address: &Address,
@@ -1351,6 +1382,7 @@ impl StorageSnapshot {
             let tx_hashes =
                 get_all_txs_for_contract(config, address, deployment_block_num, init_block_num)?;
             debug!("Tx Hashes: {:?}", tx_hashes);
+            println!("Tx Hashes: {:?}", tx_hashes);
             // And diffs for all txs
             if let Ok(all_diffs) = get_many_diff_traces(config, &tx_hashes) {
                 // And compute snapshot from there
@@ -1381,16 +1413,22 @@ impl StorageSnapshot {
         block_num: u64,
     ) {
         // retrieve account info from rpc
-        let account_storage_root = get_eth_account_at_block(config, address, block_num).unwrap();
+        let b_n = block_num;
+        let account_storage_root = get_eth_account_at_block(config, address, b_n).unwrap();
+        println!("queried num: {:?}", b_n);
 
         // snapshot type casting
         let snapshot: HashMap<B256, U256> = snapshot
             .iter()
             .map(|(k, v)| (B256::from(*k), U256::from_be_slice(v.as_slice())))
             .collect();
+        
+        println!("snapshot is {:#?}", snapshot);
 
         let reconstructed_root = root::storage_root_unhashed(snapshot);
 
+        println!("account storage root: {:?}", account_storage_root);
+        println!("reconstructed root: {:?}", reconstructed_root);
         assert_eq!(reconstructed_root, account_storage_root);
     }
 
@@ -1506,11 +1544,11 @@ impl StorageSnapshot {
             }
 
             // We don't care about SELFDESTRUCT/SUICIDE here
-
             if &depth_to_address[&log.depth] == address && log.op == "SSTORE" {
                 let last_store = last_storage.entry(log.depth).or_default();
                 let value = stack[stack.len() - 2];
                 let slot = stack[stack.len() - 1];
+                println!("slot: {}, value: {}", slot, value);
                 last_store.insert(slot, value);
                 //last_storage.insert(log.depth, last_store);
             }
@@ -1931,6 +1969,44 @@ mod tests {
             deployment_block_num,
             init_block_num,
         );
+    }
+
+    #[test]
+    fn test_reth_pure_reconstruct_constructor() {
+        let snapshot: HashMap<B256, U256> = HashMap::from([
+            (   
+                B256::from(U256::from(0x0)),
+                U256::from_str("1").unwrap()
+            ),
+            (   
+                B256::from(U256::from_str_radix("16e765cf27582f13dd5746ccd5bb2f9b2b260c0f988f6c2427c7be4d78a655f8", 16).unwrap()),
+                U256::from_str("1").unwrap()
+            ),
+            (   
+                B256::from(U256::from_str_radix("9a1c16d8591b9689d5bce2f42173a5cb4537141492c9f713a8ac2f9e0551b9c8", 16).unwrap()),
+                U256::from_str("0").unwrap()
+            ),
+            ]
+        );
+        let reconstructed_root = root::storage_root_unhashed(snapshot);
+        println!("reconstructed root: {:?}", reconstructed_root);
+    }
+
+    #[test]
+    fn test_reth_pure_reconstruct_f() {
+        let snapshot: HashMap<B256, U256> = HashMap::from([
+            (   
+                B256::from(U256::from(0x0)),
+                U256::from_str("2").unwrap()
+            ),
+            (   
+                B256::from(U256::from_str_radix("16e765cf27582f13dd5746ccd5bb2f9b2b260c0f988f6c2427c7be4d78a655f8", 16).unwrap()),
+                U256::from_str("1").unwrap()
+            ),
+            ]
+        );
+        let reconstructed_root = root::storage_root_unhashed(snapshot);
+        println!("reconstructed root: {:?}", reconstructed_root);
     }
 
     #[test]
